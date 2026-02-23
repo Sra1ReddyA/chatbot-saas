@@ -1,0 +1,104 @@
+version: '3.9'
+
+services:
+  # ─── DATABASE ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: chatbot_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-chatbot}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-chatbot_saas}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER:-chatbot}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatbot_network
+
+  # ─── BACKEND API ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chatbot_api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${DB_USER:-chatbot}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-chatbot_saas}
+    env_file:
+      - ./backend/.env.production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '3001:3001'
+    volumes:
+      - api_logs:/app/logs
+    networks:
+      - chatbot_network
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3001/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ─── FRONTEND ─────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chatbot_frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    env_file:
+      - ./frontend/.env.production
+    depends_on:
+      - api
+    ports:
+      - '3000:3000'
+    networks:
+      - chatbot_network
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3000']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── NGINX REVERSE PROXY ──────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: chatbot_nginx
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/sites:/etc/nginx/sites-available:ro
+      - ./infra/certs:/etc/nginx/certs:ro
+      - ./widget:/var/www/widget:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - chatbot_network
+
+volumes:
+  postgres_data:
+  api_logs:
+  nginx_logs:
+
+networks:
+  chatbot_network:
+    driver: bridge

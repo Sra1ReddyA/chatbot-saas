@@ -1,0 +1,354 @@
+// This is your Prisma schema file
+// Multi-tenant AI Chatbot Builder SaaS
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum Plan {
+  FREE
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum ChatbotStatus {
+  ACTIVE
+  INACTIVE
+  DRAFT
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  INCOMPLETE
+}
+
+enum WebhookEventType {
+  MESSAGE_SENT
+  CONVERSATION_STARTED
+  CONVERSATION_ENDED
+  LEAD_CAPTURED
+}
+
+// ─── ORGANIZATIONS (TENANTS) ──────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Stripe
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  plan                 Plan               @default(FREE)
+  subscriptionStatus   SubscriptionStatus @default(TRIALING)
+  currentPeriodEnd     DateTime?
+  trialEndsAt          DateTime?
+
+  // Usage tracking
+  messageCount    Int @default(0)
+  chatbotCount    Int @default(0)
+  conversationCount Int @default(0)
+
+  // Relations
+  users     User[]
+  chatbots  Chatbot[]
+  apiKeys   ApiKey[]
+  invoices  Invoice[]
+  webhooks  Webhook[]
+  usageLogs UsageLog[]
+
+  @@index([slug])
+  @@index([stripeCustomerId])
+}
+
+// ─── USERS ───────────────────────────────────────────────────────────────────
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  passwordHash   String
+  name           String
+  avatarUrl      String?
+  emailVerified  Boolean   @default(false)
+  verifyToken    String?
+  resetToken     String?
+  resetTokenExp  DateTime?
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Role within organization
+  role           String    @default("member") // owner, admin, member
+
+  // Relations
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([organizationId])
+}
+
+// ─── API KEYS ─────────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id             String    @id @default(cuid())
+  name           String
+  keyHash        String    @unique
+  keyPrefix      String    // First 8 chars for display
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([keyHash])
+}
+
+// ─── CHATBOTS ─────────────────────────────────────────────────────────────────
+
+model Chatbot {
+  id             String        @id @default(cuid())
+  name           String
+  description    String?
+  status         ChatbotStatus @default(DRAFT)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  // AI Config
+  systemPrompt   String        @db.Text
+  model          String        @default("gpt-4o-mini")
+  temperature    Float         @default(0.7)
+  maxTokens      Int           @default(500)
+  aiProvider     String        @default("openai") // openai | anthropic
+
+  // Widget Config (stored as JSON)
+  widgetConfig   Json          @default("{}")
+  // {
+  //   primaryColor: string,
+  //   textColor: string,
+  //   backgroundColor: string,
+  //   position: "bottom-right" | "bottom-left",
+  //   avatar: string | null,
+  //   welcomeMessage: string,
+  //   placeholder: string,
+  //   showBranding: boolean
+  // }
+
+  // Allowed domains for embed (CORS)
+  allowedDomains String[]      @default([])
+
+  // Knowledge base (files + URLs)
+  knowledgeBase  KnowledgeBase?
+
+  // Lead capture
+  leadCaptureEnabled Boolean @default(false)
+  leadCaptureFields  Json    @default("[]")
+  // [{ name: string, type: "email"|"text"|"phone", required: boolean, label: string }]
+
+  // Stats
+  totalConversations Int @default(0)
+  totalMessages      Int @default(0)
+  avgRating          Float?
+
+  // Relations
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversations  Conversation[]
+  leads          Lead[]
+
+  @@index([organizationId])
+  @@index([status])
+}
+
+// ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
+
+model KnowledgeBase {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chatbotId String    @unique
+  chatbot   Chatbot   @relation(fields: [chatbotId], references: [id], onDelete: Cascade)
+
+  documents KnowledgeDocument[]
+}
+
+model KnowledgeDocument {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // "file" | "url" | "text"
+  content     String   @db.Text
+  sourceUrl   String?
+  fileSize    Int?
+  mimeType    String?
+  status      String   @default("processing") // processing | ready | error
+  errorMsg    String?
+  embedding   Json?    // vector embeddings for semantic search
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+
+  @@index([knowledgeBaseId])
+  @@index([status])
+}
+
+// ─── CONVERSATIONS ───────────────────────────────────────────────────────────
+
+model Conversation {
+  id         String   @id @default(cuid())
+  sessionId  String   @unique @default(cuid())
+  startedAt  DateTime @default(now())
+  endedAt    DateTime?
+  isActive   Boolean  @default(true)
+  rating     Int?     // 1-5 star rating
+
+  // Visitor info (anonymized)
+  visitorId  String?
+  ipHash     String?  // hashed IP
+  userAgent  String?
+  referrer   String?
+  pageUrl    String?
+  country    String?
+
+  // Stats
+  messageCount Int @default(0)
+  duration     Int @default(0) // seconds
+
+  // Relations
+  chatbotId String
+  chatbot   Chatbot   @relation(fields: [chatbotId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  lead      Lead?
+
+  @@index([chatbotId])
+  @@index([sessionId])
+  @@index([startedAt])
+}
+
+// ─── MESSAGES ────────────────────────────────────────────────────────────────
+
+model Message {
+  id        String      @id @default(cuid())
+  role      MessageRole
+  content   String      @db.Text
+  tokens    Int?        // token count
+  latency   Int?        // ms
+  createdAt DateTime    @default(now())
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([createdAt])
+}
+
+// ─── LEADS ───────────────────────────────────────────────────────────────────
+
+model Lead {
+  id        String   @id @default(cuid())
+  data      Json     // captured form data
+  createdAt DateTime @default(now())
+
+  chatbotId      String
+  chatbot        Chatbot      @relation(fields: [chatbotId], references: [id], onDelete: Cascade)
+  conversationId String       @unique
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([chatbotId])
+  @@index([createdAt])
+}
+
+// ─── WEBHOOKS ─────────────────────────────────────────────────────────────────
+
+model Webhook {
+  id         String             @id @default(cuid())
+  name       String
+  url        String
+  secret     String
+  events     WebhookEventType[]
+  isActive   Boolean            @default(true)
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  deliveries     WebhookDelivery[]
+
+  @@index([organizationId])
+}
+
+model WebhookDelivery {
+  id           String   @id @default(cuid())
+  event        WebhookEventType
+  payload      Json
+  statusCode   Int?
+  response     String?
+  success      Boolean  @default(false)
+  attempts     Int      @default(1)
+  createdAt    DateTime @default(now())
+
+  webhookId String
+  webhook   Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+}
+
+// ─── INVOICES ─────────────────────────────────────────────────────────────────
+
+model Invoice {
+  id              String   @id @default(cuid())
+  stripeInvoiceId String   @unique
+  amount          Int      // cents
+  currency        String   @default("usd")
+  status          String
+  paidAt          DateTime?
+  invoiceUrl      String?
+  createdAt       DateTime @default(now())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ─── USAGE LOGS ───────────────────────────────────────────────────────────────
+
+model UsageLog {
+  id             String   @id @default(cuid())
+  type           String   // "message" | "conversation" | "lead"
+  tokensUsed     Int?
+  cost           Float?   // USD cost
+  createdAt      DateTime @default(now())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  chatbotId      String?
+
+  @@index([organizationId])
+  @@index([createdAt])
+  @@index([type])
+}

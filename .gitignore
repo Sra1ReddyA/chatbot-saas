@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Environment
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Database
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# SSL certs (never commit!)
+infra/certs/*.pem
+infra/certs/*.key
+
+# Prisma
+backend/prisma/migrations/*.sql.bak
+
+# Test
+coverage/
+.nyc_output/
+
+# Docker
+docker-compose.override.yml
